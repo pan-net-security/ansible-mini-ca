@@ -1,0 +1,80 @@
+---
+
+mini_ca_certs_to_sign:
+  - cn: "{{ ansible_fqdn }}"
+    cert_path: "/etc/ssl/certs/{{ mini_ca_hostcert_default_cn }}.pem"
+    key_path: "/etc/ssl/private/{{ mini_ca_hostcert_default_cn }}.pem"
+    csr_path: "/tmp/{{ mini_ca_hostcert_default_cn }}.csr"
+    subject: "{{ mini_ca_hostcert_default_subject }}"
+
+# CA cert parameters
+mini_ca_ca_cn: "my-mini-ca"
+mini_ca_ca_country: "SK"
+mini_ca_ca_state: "Slovakia"
+mini_ca_ca_locality: "Bratislava"
+mini_ca_ca_organization: "Government office"
+mini_ca_ca_orgunit: "Secret service"
+mini_ca_ca_key_size: 2048
+mini_ca_ca_sign_days: 1024
+# delete cache files in the last task?
+mini_ca_ca_cleanup: true
+
+# Privkey/cert pair of the CA - plaintext PEM format.
+# Leave empty to get one (for free!)
+mini_ca_ca_key: ''
+mini_ca_ca_cert: ''
+
+# Path on role delegation host, where temp files are stored
+mini_ca_temp_path: '/tmp'
+mini_ca_ca_key_path: "{{ mini_ca_temp_path }}/{{ mini_ca_ca_cn }}-key.pem"
+mini_ca_ca_cert_path: "{{ mini_ca_temp_path }}/{{ mini_ca_ca_cn }}-crt.pem"
+mini_ca_openssl_conf_path: "{{ mini_ca_temp_path }}/openssl.conf"
+
+# Hostcert parameters
+mini_ca_hostcert_default_cn: "{{ ansible_fqdn }}"
+mini_ca_hostcert_default_force: false     # true will replace existing pairs
+mini_ca_hostcert_default_country: "SK"
+mini_ca_hostcert_default_state: "Slovakia"
+mini_ca_hostcert_default_locality: "Telgart"
+mini_ca_hostcert_default_organization: "JRD Telgart s.p."
+mini_ca_hostcert_default_orgunit: "Milking service"
+mini_ca_hostcert_default_bits: 2048
+mini_ca_hostcert_default_subject: "/C={{ mini_ca_hostcert_default_country }}/ST={{ mini_ca_hostcert_default_state }}/L={{ mini_ca_hostcert_default_locality }}/O={{ mini_ca_hostcert_default_organization }}/OU={{ mini_ca_hostcert_default_orgunit }}/CN={{ mini_ca_hostcert_default_cn }}"
+# by default signed certs are valid for 365 days
+mini_ca_hostcert_default_sign_days: 365
+
+mini_ca_hostcert_default_owner: "root"
+mini_ca_hostcert_default_group: "root"
+mini_ca_hostcert_default_mode: "0640"
+
+mini_ca_hostkey_default_owner: "root"
+mini_ca_hostkey_default_group: "root"
+mini_ca_hostkey_default_mode: "0640"
+
+mini_ca_hostkey_keyUsage:
+  - digitalSignature
+  # - nonRepudiation
+  # - keyEncipherment
+  # - dataEncipherment
+  # - keyAgreement
+  # - keyCertSign
+  # - cRLSign
+  # - encipherOnly
+  # - decipherOnly
+
+mini_ca_hostkey_extendedKeyUsage:
+  - serverAuth            # SSL/TLS Web Server Authentication.
+  - clientAuth            # SSL/TLS Web Client Authentication.
+  # - codeSigning           # Code signing.
+  # - emailProtection       # E-mail Protection (S/MIME).
+  # - timeStamping          # Trusted Timestamping
+  # - OCSPSigning           # OCSP Signing
+  # - ipsecIKE              # ipsec Internet Key Exchange
+  # - msCodeInd             # Microsoft Individual Code Signing (authenticode)
+  # - msCodeCom             # Microsoft Commercial Code Signing (authenticode)
+  # - msCTLSign             # Microsoft Trust List Signing
+  # - msEFS                 # Microsoft Encrypted File System
+
+# delete cache files in the last task?
+mini_ca_hostcert_cleanup: true
+

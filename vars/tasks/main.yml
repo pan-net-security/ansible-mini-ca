@@ -1,0 +1,325 @@
+---
+
+- name: Check if certificate exists
+  stat:
+    path: "{{ item.cert_path }}"
+  with_items: "{{ mini_ca_certs_to_sign }}"
+  register: certs_exist
+
+- name: Verify if remote cert is signed by this CA
+  block:
+    - name: Save CA certificate to temp file
+      copy:
+        content: "{{ mini_ca_ca_cert }}"
+        dest: "{{ mini_ca_temp_path }}/{{ mini_ca_ca_cn }}.pem"
+    - name: Verify certificate signature
+      shell: |
+        openssl verify \
+                -CAfile "{{ mini_ca_temp_path }}/{{ mini_ca_ca_cn }}.pem" \
+                {{ item.cert_path }}
+      register: cert_verify
+      with_items: "{{ mini_ca_certs_to_sign }}"
+      ignore_errors: true
+    - name: Delete CA cert temp file
+      file:
+        path: "{{ mini_ca_temp_path }}/{{ mini_ca_ca_cn }}.pem"
+        state: absent
+  when:
+    - mini_ca_ca_cert != ''
+    # this weird construction is true when some of certs exists
+    - (certs_exist.results | map(attribute='stat') | map(attribute='exists')) | reject('even') | list | count > 0
+
+- name: Delete old key/cert/csr
+  block:
+    - name: delete key
+      file:
+        path: "{{ item.item.key_path }}"
+        state: absent
+      with_items: "{{ cert_verify.results }}"
+      when: item.rc | d(0) != 0 or mini_ca_hostcert_default_force
+    - name: delete cert
+      file:
+        path: "{{ item.item.cert_path }}"
+        state: absent
+      with_items: "{{ cert_verify.results }}"
+      when: item.rc | d(0) != 0 or mini_ca_hostcert_default_force
+    - name: delete csr
+      file:
+        path: "{{ item.item.csr_path }}"
+        state: absent
+      with_items: "{{ cert_verify.results }}"
+
+- name: Create destination dirs
+  block:
+    - name: create dir for key
+      file:
+        path: "{{ item.key_path | dirname }}"
+        state: directory
+      with_items: "{{ mini_ca_certs_to_sign }}"
+    - name: create dir for cert
+      file:
+        path: "{{ item.cert_path | dirname }}"
+        state: directory
+      with_items: "{{ mini_ca_certs_to_sign }}"
+      when:
+        - item.cert_path | dirname != item.key_path | dirname
+    - name: create dir for csr
+      file:
+        path: "{{ item.csr_path | dirname }}"
+        state: directory
+      with_items: "{{ mini_ca_certs_to_sign }}"
+      when:
+        - item.csr_path | dirname != item.key_path | dirname
+        - item.csr_path | dirname != item.cert_path | dirname
+
+- name: Generate private key
+  shell: |
+    openssl genrsa \
+                   -out "{{ item.key_path }}" \
+                   {{ item.bits | d(mini_ca_hostcert_default_bits) }}
+  args:
+    executable: "/bin/bash"
+    creates: "{{ item.key_path }}"
+  with_items: "{{ mini_ca_certs_to_sign }}"
+  register: keys_generated
+
+- name: Make sure CSRs for fresh key don't exist
+  file:
+    path: "{{ item.item.csr_path }}"
+    state: absent
+  with_items: "{{ keys_generated.results }}"
+  when: item.changed
+
+- name: Chown the private keys
+  file:
+    path: "{{ item.key_path }}"
+    owner: "{{ item.key_owner | d(mini_ca_hostkey_default_owner) }}"
+    group: "{{ item.key_group | d(mini_ca_hostkey_default_group) }}"
+    mode: "{{ item.key_mode | d(mini_ca_hostkey_default_mode) }}"
+  with_items: "{{ mini_ca_certs_to_sign }}"
+
+- name: Generate CSRs
+  shell: |
+    openssl req \
+                -new \
+                -out "{{ item.item.csr_path }}" \
+                -key "{{ item.item.key_path }}" \
+                -subj "{{ item.item.subject | d(mini_ca_hostcert_default_subject) }}" \
+                -reqexts v3_ext \
+                -config <(printf "distinguished_name=distinguished_name\n[distinguished_name]\n[v3_ext]\n{{ ('subjectAltName='+','.join(['DNS:'+item.item.cn] | union(item.item.altnames|d([]))| unique)) }}")
+  args:
+    executable: "/bin/bash"
+  with_items: "{{ certs_exist.results }}"
+  when: not item.stat.exists or mini_ca_hostcert_default_force
+  register: csr_generated
+
+- name: Check if CSR exists
+  stat:
+    path: "{{ item.csr_path }}"
+  register: csr_exists
+  with_items: "{{ mini_ca_certs_to_sign }}"
+
+- name: Pick CSR from remote node
+  slurp:
+    src: "{{ item.item.csr_path }}"
+  register: csrs
+  with_items: "{{ csr_exists.results }}"
+  when:
+    item.stat.exists
+
+- name: Save CSR to local temp
+  copy:
+    content: "{{ item.content | b64decode }}"
+    dest: "{{ mini_ca_temp_path }}/{{ inventory_hostname }}-{{ item.item.item.cn }}.csr"
+  delegate_to: localhost
+  with_items: "{{ csrs.results }}"
+  when: item.item.stat.exists
+  register: csr_saved
+
+- name: Create openssl config
+  template:
+    src: "openssl.conf.j2"
+    dest: "{{ mini_ca_openssl_conf_path }}"
+  run_once: true
+  delegate_to: localhost
+  # when:
+  #   - (csrs.results | map(attribute='stat') | map(attribute='exists')) | reject('even') | list | count > 0
+
+- name: Handle CA
+  block:
+    - name: Save CA key to temp
+      copy:
+        content: "{{ mini_ca_ca_key }}"
+        dest: "{{ mini_ca_ca_key_path }}"
+        mode: 0600
+      run_once: true
+      delegate_to: localhost
+      when:
+        - mini_ca_ca_key != ''
+
+    - name: Generate CA key
+      block:
+        - name: Pickup the key if it eventually exists
+          slurp:
+            src: "{{ mini_ca_ca_key_path }}"
+          register: cakey
+          ignore_errors: true
+        - name: Set the key fact
+          set_fact:
+            mini_ca_ca_key: "{{ cakey.content | b64decode }}"
+          when: cakey is not failed
+        - name: Generate key
+          command: |
+            openssl genrsa -out {{ mini_ca_ca_key_path }} \
+                                {{ mini_ca_ca_key_size }}
+        - name: Slurp the CA key
+          slurp:
+            src: "{{ mini_ca_ca_key_path }}"
+          register: cakey
+        - name: Set the key fact
+          set_fact:
+            mini_ca_ca_key: "{{ cakey.content | b64decode }}"
+      when:
+        - mini_ca_ca_key == ''
+      run_once: true
+      delegate_to: localhost
+
+    - name: Save CA cert to temp
+      copy:
+        content: "{{ mini_ca_ca_cert }}"
+        dest: "{{ mini_ca_ca_cert_path }}"
+        mode: 0600
+      run_once: true
+      delegate_to: localhost
+      when:
+        - mini_ca_ca_cert != ''
+
+    - name: Create openssl CA dirs
+      file:
+        path: "{{ item }}"
+        state: directory
+      with_items:
+        - "{{ mini_ca_temp_path }}/{{ mini_ca_ca_cn }}"
+        - "{{ mini_ca_temp_path }}/{{ mini_ca_ca_cn }}/newcerts"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Generate random serial number
+      shell: >
+        openssl rand \
+                -hex 10 > \
+                {{ mini_ca_temp_path }}/{{ mini_ca_ca_cn }}/serial
+      register: serial
+      delegate_to: localhost
+      run_once: true
+
+    - name: Create empty cert index
+      file:
+        path: "{{ mini_ca_temp_path }}/{{ mini_ca_ca_cn }}/index.txt"
+        state: touch
+      delegate_to: localhost
+      run_once: true
+
+    - name: Generate CA cert
+      block:
+        - name: Pickup the cert if it eventually exists
+          slurp:
+            src: "{{ mini_ca_ca_cert_path }}"
+          register: cacert
+          ignore_errors: true
+        - name: Set the cert fact
+          set_fact:
+            mini_ca_ca_cert: "{{ cacert.content | b64decode }}"
+          when: cacert is not failed
+        - name: Generate certificate
+          command: |
+            openssl req -new \
+                        -x509 \
+                        -out "{{ mini_ca_ca_cert_path }}" \
+                        -key "{{ mini_ca_ca_key_path }}" \
+                        -days "{{ mini_ca_hostcert_default_sign_days }}" \
+                        -subj "/C={{ mini_ca_ca_country }}/ST={{ mini_ca_ca_state | replace(',', '\\,') }}/L={{ mini_ca_ca_locality | replace(',', '\\,') }}/O={{ mini_ca_ca_organization | replace(',', '\\,') }}/OU={{ mini_ca_ca_orgunit | replace(',', '\\,') }}/CN={{ mini_ca_ca_cn }}"
+        - name: Slurp the CA cert
+          slurp:
+            src: "{{ mini_ca_ca_cert_path }}"
+          register: cacert
+        - name: Set the cert fact
+          set_fact:
+            mini_ca_ca_cert: "{{ cacert.content | b64decode }}"
+      when:
+        - mini_ca_ca_cert == ''
+      run_once: true
+      delegate_to: localhost
+
+  when: false in (hostvars |
+                  json_query('*.certs_exist.results[*].stat.exists') |
+                  flatten |
+                  reject('odd') |
+                  list |
+                  unique)
+        or mini_ca_hostcert_default_force
+
+- name: Sign CSRs
+  shell: >
+    openssl ca \
+            -batch \
+            -in "{{ mini_ca_temp_path }}/{{ inventory_hostname }}-{{ item.item.item.cn }}.csr" \
+            -cert "{{ mini_ca_ca_cert_path }}" \
+            -keyfile "{{ mini_ca_ca_key_path }}" \
+            -config "{{ mini_ca_openssl_conf_path }}" \
+            -extensions v3_req \
+            -out "{{ mini_ca_temp_path }}/{{ inventory_hostname }}-{{ item.item.item.cn }}.pem"
+  args:
+    executable: "/bin/bash"
+  delegate_to: localhost
+  register: csr_signed
+  with_items: "{{ csrs.results }}"
+  when: item.item.stat.exists
+
+- name: Distribute certificates
+  copy:
+    src: "{{ mini_ca_temp_path }}/{{ inventory_hostname }}-{{ item.cn }}.pem"
+    dest: "{{ item.cert_path }}"
+    owner: "{{ item.cert_owner | d(mini_ca_hostcert_default_owner) }}"
+    group: "{{ item.cert_group | d(mini_ca_hostcert_default_group) }}"
+    mode: "{{ item.cert_mode | d(mini_ca_hostcert_default_mode) }}"
+  with_items: "{{ mini_ca_certs_to_sign }}"
+  when: csr_signed.changed | d(false)
+
+- name: Delete CSR
+  file:
+    path: "{{ item.csr_path }}"
+    state: absent
+  with_items: "{{ mini_ca_certs_to_sign }}"
+  when: mini_ca_hostcert_cleanup
+
+- name: Local CA cleanup
+  file:
+    path: "{{ item.path }}"
+    state: absent
+  with_items:
+    - path: "{{ mini_ca_ca_key_path }}"
+      when: "{{ mini_ca_ca_cleanup }}"
+    - path: "{{ mini_ca_ca_cert_path }}"
+      when: "{{ mini_ca_ca_cleanup }}"
+    - path: "{{ mini_ca_openssl_conf_path }}"
+      when: "{{ mini_ca_ca_cleanup }}"
+    - path: "{{ mini_ca_temp_path }}/{{ mini_ca_ca_cn }}"
+      when: "{{ mini_ca_ca_cleanup }}"
+  when:
+    - item.when | bool
+  delegate_to: localhost
+
+- name: Local csr cleanup
+  file:
+    path: "{{ mini_ca_temp_path }}/{{ inventory_hostname }}-{{ item.cn }}.csr"
+    state: absent
+  with_items: "{{ mini_ca_certs_to_sign }}"
+  when: mini_ca_hostcert_cleanup
+
+- name: Local crt cleanup
+  file:
+    path: "{{ mini_ca_temp_path }}/{{ inventory_hostname }}-{{ item.cn }}.crt"
+    state: absent
+  with_items: "{{ mini_ca_certs_to_sign }}"
+  when: mini_ca_hostcert_cleanup

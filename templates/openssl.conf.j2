@@ -1,0 +1,36 @@
+[ ca ]
+default_ca      = CA_default            # The default ca section
+
+[ CA_default ]
+
+dir            = {{ mini_ca_temp_path+'/'+mini_ca_ca_cn }}
+database       = $dir/index.txt        # index file.
+new_certs_dir  = $dir/newcerts         # new certs dir
+
+certificate    = {{ mini_ca_ca_cert_path }}
+serial         = $dir/serial
+private_key    = {{ mini_ca_ca_key_path }}
+RANDFILE       = /dev/urandom
+
+default_days   = {{ mini_ca_ca_sign_days }}
+#default_crl_days= 30                   # how long before next CRL
+default_md     = sha256                   # md to use
+
+policy         = policy_any            # default policy
+email_in_dn    = no                    # Don't add the email into cert DN
+
+name_opt       = ca_default            # Subject name display option
+cert_opt       = ca_default            # Certificate display option
+copy_extensions = copy
+
+[ policy_any ]
+countryName            = supplied
+stateOrProvinceName    = optional
+organizationName       = optional
+organizationalUnitName = optional
+commonName             = supplied
+emailAddress           = optional
+
+[v3_req]
+keyUsage = {{ mini_ca_hostkey_keyUsage | join(',') }}
+extendedKeyUsage = {{ mini_ca_hostkey_extendedKeyUsage | join(',') }}
