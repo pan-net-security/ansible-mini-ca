@@ -15,6 +15,7 @@ If the CA (key/crt) is empty it will generate one itself.
 * If there are pre-existing certificates on remote hosts, signed by a different CA, both key/crt will be deleted and recreated
 * If you set `mini_ca_ca_key` to some key and leave `mini_ca_ca_cert` empty, it will work
 * If you set `mini_ca_ca_cert` to some crt and leave `mini_ca_ca_key` empty, it will not work (and fail badly)
+* Consider using `any_errors_fatal: true` for your play if your app relies on all certificates being issued.
 
 ## Role Variables
 

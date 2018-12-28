@@ -4,6 +4,8 @@
   stat:
     path: "{{ item.cert_path }}"
   with_items: "{{ mini_ca_certs_to_sign }}"
+  loop_control:
+    label: "{{ item.cert_path }}"
   register: certs_exist
 
 - name: Verify if remote cert is signed by this CA
@@ -36,18 +38,24 @@
         path: "{{ item.item.key_path }}"
         state: absent
       with_items: "{{ cert_verify.results }}"
+      loop_control:
+        label: "{{ item.item.key_path }}"
       when: item.rc | d(0) != 0 or mini_ca_hostcert_default_force
     - name: delete cert
       file:
         path: "{{ item.item.cert_path }}"
         state: absent
       with_items: "{{ cert_verify.results }}"
+      loop_control:
+        label: "{{ item.item.cert_path }}"
       when: item.rc | d(0) != 0 or mini_ca_hostcert_default_force
     - name: delete csr
       file:
         path: "{{ item.item.csr_path }}"
         state: absent
       with_items: "{{ cert_verify.results }}"
+      loop_control:
+        label: "{{ item.item.csr_path }}"
 
 - name: Create destination dirs
   block:
@@ -56,11 +64,15 @@
         path: "{{ item.key_path | dirname }}"
         state: directory
       with_items: "{{ mini_ca_certs_to_sign }}"
+      loop_control:
+        label: "{{ item.key_path | dirname }}"
     - name: create dir for cert
       file:
         path: "{{ item.cert_path | dirname }}"
         state: directory
       with_items: "{{ mini_ca_certs_to_sign }}"
+      loop_control:
+        label: "{{ item.cert_path | dirname }}"
       when:
         - item.cert_path | dirname != item.key_path | dirname
     - name: create dir for csr
@@ -68,6 +80,8 @@
         path: "{{ item.csr_path | dirname }}"
         state: directory
       with_items: "{{ mini_ca_certs_to_sign }}"
+      loop_control:
+        label: "{{ item.csr_path | dirname }}"
       when:
         - item.csr_path | dirname != item.key_path | dirname
         - item.csr_path | dirname != item.cert_path | dirname
@@ -81,6 +95,8 @@
     executable: "/bin/bash"
     creates: "{{ item.key_path }}"
   with_items: "{{ mini_ca_certs_to_sign }}"
+  loop_control:
+    label: "{{ item.key_path }}"
   register: keys_generated
 
 - name: Make sure CSRs for fresh key don't exist
@@ -88,6 +104,8 @@
     path: "{{ item.item.csr_path }}"
     state: absent
   with_items: "{{ keys_generated.results }}"
+  loop_control:
+    label: "{{ item.item.csr_path }}"
   when: item.changed
 
 - name: Chown the private keys
@@ -97,6 +115,11 @@
     group: "{{ item.key_group | d(mini_ca_hostkey_default_group) }}"
     mode: "{{ item.key_mode | d(mini_ca_hostkey_default_mode) }}"
   with_items: "{{ mini_ca_certs_to_sign }}"
+  loop_control:
+    label: >
+      Setting owner {{ item.key_owner|d(mini_ca_hostkey_default_owner) }},
+      group {{ item.key_group|d(mini_ca_hostkey_default_group) }},
+      mode {{ item.key_mode | d(mini_ca_hostkey_default_mode) }}
 
 - name: Generate CSRs
   shell: |
@@ -118,21 +141,28 @@
     path: "{{ item.csr_path }}"
   register: csr_exists
   with_items: "{{ mini_ca_certs_to_sign }}"
+  loop_control:
+    label: "{{ item.csr_path }}"
 
 - name: Pick CSR from remote node
   slurp:
     src: "{{ item.item.csr_path }}"
   register: csrs
   with_items: "{{ csr_exists.results }}"
+  loop_control:
+    label: "{{ item.item.csr_path }}"
   when:
     item.stat.exists
 
 - name: Save CSR to local temp
   copy:
     content: "{{ item.content | b64decode }}"
-    dest: "{{ mini_ca_temp_path }}/{{ inventory_hostname }}-{{ item.item.item.cn }}.csr"
+    dest: "{{ mini_ca_temp_path }}/{{ inventory_hostname }}-{{ index }}.csr"
   delegate_to: localhost
-  with_items: "{{ csrs.results }}"
+  loop: "{{ csrs.results | flatten(levels=1) }}"
+  loop_control:
+    label: "{{ item.item.item.cn }}"
+    index_var: index
   when: item.item.stat.exists
   register: csr_saved
 
@@ -255,35 +285,45 @@
                   json_query('*.certs_exist.results[*].stat.exists') |
                   flatten |
                   reject('odd') |
-                  list |
+                  list + ((
+                             certs_exist | d(__local_stat_default)
+                          ) | json_query('results[*].stat.exists')
+                         ) |
                   unique)
         or mini_ca_hostcert_default_force
 
 - name: Sign CSRs
   shell: >
+    flock /tmp/ca-lock \
     openssl ca \
             -batch \
-            -in "{{ mini_ca_temp_path }}/{{ inventory_hostname }}-{{ item.item.item.cn }}.csr" \
+            -in "{{ mini_ca_temp_path }}/{{ inventory_hostname }}-{{ index }}.csr" \
             -cert "{{ mini_ca_ca_cert_path }}" \
             -keyfile "{{ mini_ca_ca_key_path }}" \
             -config "{{ mini_ca_openssl_conf_path }}" \
             -extensions v3_req \
-            -out "{{ mini_ca_temp_path }}/{{ inventory_hostname }}-{{ item.item.item.cn }}.pem"
+            -out "{{ mini_ca_temp_path }}/{{ inventory_hostname }}-{{ index }}.pem"
   args:
     executable: "/bin/bash"
   delegate_to: localhost
   register: csr_signed
-  with_items: "{{ csrs.results }}"
+  loop: "{{ csrs.results | flatten(levels=1) }}"
+  loop_control:
+    label: "{{ item.item.item.cn }}"
+    index_var: index
   when: item.item.stat.exists
 
 - name: Distribute certificates
   copy:
-    src: "{{ mini_ca_temp_path }}/{{ inventory_hostname }}-{{ item.cn }}.pem"
+    src: "{{ mini_ca_temp_path }}/{{ inventory_hostname }}-{{ index }}.pem"
     dest: "{{ item.cert_path }}"
     owner: "{{ item.cert_owner | d(mini_ca_hostcert_default_owner) }}"
     group: "{{ item.cert_group | d(mini_ca_hostcert_default_group) }}"
     mode: "{{ item.cert_mode | d(mini_ca_hostcert_default_mode) }}"
-  with_items: "{{ mini_ca_certs_to_sign }}"
+  loop: "{{ mini_ca_certs_to_sign | flatten(levels=1) }}"
+  loop_control:
+    label: "{{ item.cn }}"
+    index_var: index
   when: csr_signed.changed | d(false)
 
 - name: Delete CSR
@@ -291,6 +331,8 @@
     path: "{{ item.csr_path }}"
     state: absent
   with_items: "{{ mini_ca_certs_to_sign }}"
+  loop_control:
+    label: "{{ item.csr_path }}"
   when: mini_ca_hostcert_cleanup
 
 - name: Local CA cleanup
@@ -308,18 +350,27 @@
       when: "{{ mini_ca_ca_cleanup }}"
   when:
     - item.when | bool
+  run_once: true
+  loop_control:
+    label: "{{ item.path }}"
   delegate_to: localhost
 
 - name: Local csr cleanup
   file:
-    path: "{{ mini_ca_temp_path }}/{{ inventory_hostname }}-{{ item.cn }}.csr"
+    path: "{{ mini_ca_temp_path }}/{{ inventory_hostname }}-{{ index }}.csr"
     state: absent
-  with_items: "{{ mini_ca_certs_to_sign }}"
+  loop: "{{ mini_ca_certs_to_sign | flatten(levels=1) }}"
+  loop_control:
+    label: "{{ item.cn }}"
+    index_var: index
   when: mini_ca_hostcert_cleanup
 
 - name: Local crt cleanup
   file:
-    path: "{{ mini_ca_temp_path }}/{{ inventory_hostname }}-{{ item.cn }}.crt"
+    path: "{{ mini_ca_temp_path }}/{{ inventory_hostname }}-{{ index }}.crt"
     state: absent
-  with_items: "{{ mini_ca_certs_to_sign }}"
+  loop: "{{ mini_ca_certs_to_sign | flatten(levels=1) }}"
+  loop_control:
+    label: "{{ item.cn}}"
+    index_var: index
   when: mini_ca_hostcert_cleanup
