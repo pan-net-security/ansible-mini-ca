@@ -78,3 +78,7 @@ mini_ca_hostkey_extendedKeyUsage:
 # delete cache files in the last task?
 mini_ca_hostcert_cleanup: true
 
+__local_stat_default:
+  results:
+    - stat:
+      exists: true
